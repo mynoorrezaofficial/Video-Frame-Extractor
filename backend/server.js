@@ -4,7 +4,7 @@ import multer from 'multer';
 import archiver from 'archiver';
 import { spawn } from 'child_process';
 import { createWriteStream } from 'fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -13,7 +13,6 @@ import ffmpegPath from 'ffmpeg-static';
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = process.env.PORT || 3001;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 app.use(cors());
 
@@ -52,22 +51,37 @@ app.post('/api/extract', upload.single('video'), async (req, res) => {
     return;
   }
 
-  const startTime = String(req.body.startTime ?? '00:00:00');
-  const endTime = String(req.body.endTime ?? '00:00:00');
+  let segments;
+  try {
+    segments = JSON.parse(req.body.segments || '[]');
+  } catch {
+    segments = [];
+  }
+
+  if (!Array.isArray(segments) || segments.length === 0) {
+    res.status(400).json({ error: 'At least one time segment is required.' });
+    return;
+  }
+
   const mode = String(req.body.mode ?? 'fps');
   const fps = Number(req.body.fps ?? 1);
   const frameCount = Number(req.body.frameCount ?? 1);
 
-  const startSeconds = parseTime(startTime);
-  const endSeconds = parseTime(endTime);
+  const totalDuration = segments.reduce((acc, seg) => {
+    const start = parseTime(seg.start);
+    const end = parseTime(seg.end);
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      return acc + (end - start);
+    }
+    return acc;
+  }, 0);
 
-  if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) {
-    res.status(400).json({ error: 'Start time must be before end time.' });
+  if (totalDuration <= 0) {
+    res.status(400).json({ error: 'No valid time segments found.' });
     return;
   }
 
-  const duration = endSeconds - startSeconds;
-  const captureFps = mode === 'count' ? frameCount / duration : fps;
+  const captureFps = mode === 'count' ? frameCount / totalDuration : fps;
 
   if (!Number.isFinite(captureFps) || captureFps <= 0) {
     res.status(400).json({ error: 'Frame rate must be greater than zero.' });
@@ -83,16 +97,33 @@ app.post('/api/extract', upload.single('video'), async (req, res) => {
     await mkdir(outputDir, { recursive: true });
     await writeFile(inputPath, file.buffer);
 
-    const outputPattern = path.join(outputDir, 'frame-%04d.jpg');
-    await runFfmpeg([
-      '-y',
-      '-ss', startTime,
-      '-to', endTime,
-      '-i', inputPath,
-      '-vf', `fps=${captureFps}`,
-      '-q:v', '2',
-      outputPattern
-    ]);
+    let frameIndex = 0;
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const startTime = seg.start;
+      const endTime = seg.end;
+
+      const startSec = parseTime(startTime);
+      const endSec = parseTime(endTime);
+
+      if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
+        continue;
+      }
+
+      const outputPattern = path.join(outputDir, `segment${i + 1}-frame-%04d.jpg`);
+      await runFfmpeg([
+        '-y',
+        '-ss', startTime,
+        '-to', endTime,
+        '-i', inputPath,
+        '-vf', `fps=${captureFps}`,
+        '-q:v', '2',
+        outputPattern
+      ]);
+
+      frameIndex += 1;
+    }
 
     const archive = archiver('zip', { zlib: { level: 9 } });
     const output = createWriteStream(zipPath);

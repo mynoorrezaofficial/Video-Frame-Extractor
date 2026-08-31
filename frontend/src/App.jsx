@@ -1,11 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-const defaultSegments = [
-  { time: '00:00:12', label: 'Scene intro' },
-  { time: '00:00:48', label: 'Primary action' },
-  { time: '00:01:26', label: 'Highlight frame' }
-];
-
 function parseTime(value) {
   const parts = value.split(':').map(Number);
   if (parts.length !== 3 || parts.some((part) => Number.isNaN(part))) return NaN;
@@ -18,19 +12,16 @@ function formatCount(value) {
   return Math.round(value).toLocaleString();
 }
 
-export default function App() {
-  const defaults = {
-    videoName: 'sample-video.mp4',
-    startTime: '00:00:10',
-    endTime: '00:00:45',
-    mode: 'fps',
-    fps: 5,
-    frameCount: 100
-  };
+let segmentId = 0;
 
+function createSegment(start = '00:00:00', end = '00:00:05') {
+  segmentId += 1;
+  return { id: segmentId, start, end };
+}
+
+export default function App() {
   const [videoName, setVideoName] = useState('sample-video.mp4');
-  const [startTime, setStartTime] = useState('00:00:10');
-  const [endTime, setEndTime] = useState('00:00:45');
+  const [segments, setSegments] = useState([createSegment('00:00:10', '00:00:45')]);
   const [mode, setMode] = useState('fps');
   const [fps, setFps] = useState(5);
   const [frameCount, setFrameCount] = useState(100);
@@ -46,18 +37,23 @@ export default function App() {
     };
   }, [videoUrl]);
 
-  const duration = useMemo(() => {
-    const start = parseTime(startTime);
-    const end = parseTime(endTime);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return NaN;
-    return end - start;
-  }, [startTime, endTime]);
+  const totalDuration = useMemo(() => {
+    let total = 0;
+    for (const seg of segments) {
+      const start = parseTime(seg.start);
+      const end = parseTime(seg.end);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        total += end - start;
+      }
+    }
+    return total;
+  }, [segments]);
 
   const estimatedFrames = useMemo(() => {
-    if (!Number.isFinite(duration)) return NaN;
-    if (mode === 'fps') return duration * Number(fps);
+    if (!Number.isFinite(totalDuration) || totalDuration === 0) return NaN;
+    if (mode === 'fps') return totalDuration * Number(fps);
     return Number(frameCount);
-  }, [duration, mode, fps, frameCount]);
+  }, [totalDuration, mode, fps, frameCount]);
 
   const onPickFile = (event) => {
     const file = event.target.files?.[0];
@@ -69,18 +65,39 @@ export default function App() {
     setStatus(`Loaded ${file.name}.`);
   };
 
+  const addSegment = () => {
+    setSegments((prev) => [...prev, createSegment()]);
+  };
+
+  const removeSegment = (id) => {
+    setSegments((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((s) => s.id !== id);
+    });
+  };
+
+  const updateSegment = (id, field, value) => {
+    setSegments((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, [field]: value } : s))
+    );
+  };
+
   const onExtract = () => {
     if (!selectedFile) {
       setStatus('Please choose a video file first.');
       return;
     }
 
-    if (!Number.isFinite(duration)) {
-      setStatus('Please enter a valid start and end time.');
+    const validSegments = segments.filter((s) => {
+      const start = parseTime(s.start);
+      const end = parseTime(s.end);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start;
+    });
+
+    if (validSegments.length === 0) {
+      setStatus('Please add at least one valid time segment.');
       return;
     }
-
-    const detail = mode === 'fps' ? `${fps} FPS` : `${frameCount} frames`;
 
     const run = async () => {
       try {
@@ -89,8 +106,7 @@ export default function App() {
 
         const formData = new FormData();
         formData.append('video', selectedFile);
-        formData.append('startTime', startTime);
-        formData.append('endTime', endTime);
+        formData.append('segments', JSON.stringify(validSegments.map((s) => ({ start: s.start, end: s.end }))));
         formData.append('mode', mode);
         formData.append('fps', String(fps));
         formData.append('frameCount', String(frameCount));
@@ -113,7 +129,7 @@ export default function App() {
         link.click();
         URL.revokeObjectURL(url);
 
-        setStatus(`Downloaded ${formatCount(estimatedFrames)} frames at ${detail}.`);
+        setStatus(`Downloaded frames from ${validSegments.length} segment(s).`);
       } catch (error) {
         setStatus(error.message || 'Something went wrong during extraction.');
       } finally {
@@ -126,12 +142,11 @@ export default function App() {
 
   const onReset = () => {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
-    setVideoName(defaults.videoName);
-    setStartTime(defaults.startTime);
-    setEndTime(defaults.endTime);
-    setMode(defaults.mode);
-    setFps(defaults.fps);
-    setFrameCount(defaults.frameCount);
+    setVideoName('sample-video.mp4');
+    setSegments([createSegment('00:00:10', '00:00:45')]);
+    setMode('fps');
+    setFps(5);
+    setFrameCount(100);
     setSelectedFile(null);
     setVideoUrl(null);
     setStatus('Ready to configure extraction.');
@@ -171,15 +186,30 @@ export default function App() {
               </span>
             </label>
 
-            <div className="field-row">
-              <label>
-                <span>Start time</span>
-                <input value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="00:00:00" />
-              </label>
-              <label>
-                <span>End time</span>
-                <input value={endTime} onChange={(e) => setEndTime(e.target.value)} placeholder="00:00:00" />
-              </label>
+            <div className="segments-header">
+              <h3>Time Segments</h3>
+              <button className="add-btn" type="button" onClick={addSegment}>+ Add Segment</button>
+            </div>
+
+            <div className="segments-list">
+              {segments.map((seg, index) => (
+                <div key={seg.id} className="segment-row">
+                  <span className="segment-label">Segment {index + 1}</span>
+                  <div className="segment-fields">
+                    <label>
+                      <span>Start</span>
+                      <input value={seg.start} onChange={(e) => updateSegment(seg.id, 'start', e.target.value)} placeholder="00:00:00" />
+                    </label>
+                    <label>
+                      <span>End</span>
+                      <input value={seg.end} onChange={(e) => updateSegment(seg.id, 'end', e.target.value)} placeholder="00:00:00" />
+                    </label>
+                  </div>
+                  {segments.length > 1 && (
+                    <button className="remove-btn" type="button" onClick={() => removeSegment(seg.id)}>✕</button>
+                  )}
+                </div>
+              ))}
             </div>
 
             <div className="mode-switch">
@@ -225,32 +255,22 @@ export default function App() {
             <h2>Extraction Preview</h2>
               <div className="preview-meta">
                 <div>
+                  <span>Segments</span>
+                  <strong>{segments.length}</strong>
+                </div>
+                <div>
+                  <span>Total Duration</span>
+                  <strong>{Number.isFinite(totalDuration) ? `${totalDuration}s` : '--'}</strong>
+                </div>
+                <div>
                   <span>Mode</span>
                   <strong>{mode === 'fps' ? 'Frames per second' : 'Frame count'}</strong>
-                </div>
-                <div>
-                  <span>Start</span>
-                  <strong>{startTime}</strong>
-                </div>
-                <div>
-                  <span>End</span>
-                  <strong>{endTime}</strong>
                 </div>
                 <div>
                   <span>Frames</span>
                   <strong>{formatCount(estimatedFrames)}</strong>
                 </div>
               </div>
-
-            <h3>Quick Picks</h3>
-            <div className="chips">
-              {defaultSegments.map((segment) => (
-                <button key={segment.time} type="button" className="chip" onClick={() => setStartTime(segment.time)}>
-                  <strong>{segment.time}</strong>
-                  <span>{segment.label}</span>
-                </button>
-              ))}
-            </div>
           </div>
         </section>
       </main>
